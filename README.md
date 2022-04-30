@@ -1,1 +1,2 @@
-# Avoc
+# avoc
+Fully Functional FE framework
