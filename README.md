@@ -85,11 +85,111 @@ const Counter: AvocComponent<Model, Msg> = {
 export default Counter;
 ```
 
+## Function Components
+For components without state, you can simply use a function:
+```tsx
+import Avoc from "avoc";
+
+const StupidComponent = () => {
+    return (<div>Hello, I have no state or events</div>);
+}
+
+export default StupidComponent;
+```
+
 ## Props
-comming soon...
+Props can be used to pass attributes from a parent component to a child component:
+```tsx
+<GreetingComponent name="Pickle Rick" />
+```
+Function components can just receive the props via the first params as in react:
+```tsx
+const GreetingComponent = ({ name }) => {
+    return (<div>Hello, it's me, {name}</div>);
+}
+```
+
+In statefull components its the second param of the render function:
+```tsx
+const GreetingComponent: AvocComponent = {
+    render: (_model, { name }) => (<div>Hello, it's me, {name}</div>),
+}
+```
 
 ## Global state
-comming soon...
+To handle global state in your application there is an inbuilt library `AvocStore`. 
+
+### Buckets
+The global store is separated in little buckets that only hold a small part of the data. You can change this data in the buckets via reducers. Reducers are listening to Actions that you can send with the AvocStore effect.
+
+### Setup
+You have to initialize it with the `create` function. Here we set up a bucket that is called fruits and one that is called legumes. The reducers will change the buckets as soon as they get called.
+```tsx
+import { AvocStore } from 'avoc';
+
+const avocStore = AvocStore.create(
+    // initial state
+    {
+        fruits: ['banana', 'apple', 'orange'],
+        legumes: [],
+    },
+    // reducers
+    {
+        fruits: {
+            'add': (state, payload) => [...state, payload],
+            'noop': (state) => state,
+            'remove': (state, payload) => state.filter(i => i !== payload),
+        },
+        legumes: {
+            'add': (state, payload) => [...state, payload],
+        }
+    });
+})
+Avoc.render(<App />, container, { avocStore })
+```
+### Usage
+The effects can be used to dispatch anything in your store.
+```tsx
+const addBanana = () => AvocStore.update('fruits', 'add', 'banana');
+```
+Such an effect can be directly run on any dom event:
+```tsx
+<button onClick={addBanana}>Add Banana</button>
+```
+
+## Effects
+You have already learned about several effects like the `Avoc.updateModel` and the `AvocStore.update`. There are several more and you can combine them as well
+### Component model
+```tsx
+Avoc.updateModel<Msg>({ type: 'increment', value: 3 });
+```
+insert documentation here
+```tsx
+Avoc.getModel<Mdl>(): Mdl;
+```
+insert documentation here
+
+### Avoc Store 
+```tsx
+AvocStore.update(bucket: BucketKey, actionType: BucketActionType, payload: any): void;
+```
+insert documentation here
+```tsx
+AvocStore.read(bucket: BucketKey): BucketValue;
+```
+insert documentation here
+
+### Composition
+```tsx
+import { _do } from "avoc/systemIO";
+
+const readAndUpdate = _do(function* (value: number) {
+    const model = yield Avoc.getModel();
+    if (model.count < 1) {
+        yield Avoc.updateModel({ type: 'increment', value, });
+    }
+});
+```
 
 ## Avoc UI
 comming soon...
