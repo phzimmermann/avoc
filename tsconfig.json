@@ -1,0 +1,9 @@
+{
+    "compilerOptions": {
+      "jsx": "react",
+      "jsxFactory": "Avoc.createElement",
+      "jsxFragmentFactory": "Fragment",
+      "module": "commonjs",
+      "lib": ["es2019"]
+    }
+  }
