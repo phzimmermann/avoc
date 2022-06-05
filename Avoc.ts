@@ -1,4 +1,25 @@
-function createElement(type, props, ...children) {
+import { AvocElement } from "./AvocTypes";
+import SystemIO from "./SystemIO";
+
+type AvocStruct<T, P> = {
+  type: T;
+  Props: P;
+  children: any;
+};
+
+function co<P>(type: string, props: P, ...children): AvocStruct<string, P>;
+function co<P, Mdl, Msg extends { type: string; value: any }>(
+  type: AvocElement<Mdl, Msg>,
+  props: P,
+  ...children
+): AvocStruct<AvocElement<Mdl, Msg>, P>;
+function co<P>(
+  type: (props: P) => any,
+  props: P,
+  ...children
+): AvocStruct<(props: P) => any, P>;
+
+function co(type: any, props, ...children): any {
   return {
     type,
     props: {
@@ -22,22 +43,380 @@ function createTextElement(text) {
   };
 }
 
-function createDom(fiber) {
-  const dom =
-    fiber.type == "TEXT_ELEMENT"
-      ? document.createTextNode("")
-      : document.createElement(fiber.type);
-
-  updateDom(dom, {}, fiber.props);
-
-  return dom;
+interface AvocNode {
+  type: any;
+  children?: AvocNode[];
+  add: (parentDom, next?) => void;
+  delete: (domParent: any) => void;
+  updateProps: (props) => void;
+  getLastDom: () => any;
 }
+
+class AvocNodeNone implements AvocNode {
+  type: null;
+  dom;
+  children: [];
+  add(parentDom: any) {
+    this.dom = parentDom;
+  }
+  delete() {}
+  updateProps() {}
+  getLastDom() {}
+}
+
+class AvocNodeText implements AvocNode {
+  public type = "TEXT_ELEMENT";
+  text;
+  dom;
+  constructor(text) {
+    this.text = text;
+  }
+  add(parentDom, next) {
+    this.dom = document.createTextNode("");
+    if (next) {
+      parentDom.insertBefore(this.dom, next);
+    } else {
+      parentDom.appendChild(this.dom);
+    }
+    this.updateDom();
+  }
+  updateDom() {
+    this.dom.nodeValue = this.text;
+  }
+  delete(domParent) {
+    domParent.removeChild(this.dom);
+  }
+  updateProps(props: any) {
+    if (this.text !== props.nodeValue) {
+      this.dom.nodeValue = props.nodeValue;
+      this.text = props.nodeValue;
+    }
+  }
+  getLastDom() {
+    return this.dom;
+  }
+}
+
+class AvocNodeHTML implements AvocNode {
+  children: AvocNode[] = [];
+  dom;
+  props;
+  oldProps = {};
+  type;
+  system;
+  constructor(type, props, system) {
+    this.type = type;
+    this.props = props;
+    this.system = system;
+    this.children = createChildren(props.children, system);
+  }
+  add(parentDom, next) {
+    this.dom = document.createElement(this.type);
+    if (next) {
+      parentDom.insertBefore(this.dom, next);
+    } else {
+      parentDom.appendChild(this.dom);
+    }
+    this.children.forEach((child) => child.add(this.dom));
+    this.updateDom();
+  }
+  updateDom() {
+    updateDom(this.dom, this.oldProps, this.props, this.system);
+  }
+  delete(domParent) {
+    domParent.removeChild(this.dom);
+  }
+  updateProps(props: any) {
+    updateDom(this.dom, this.props, props, this.system);
+    this.children = updateChildren(this, props.children, this.system);
+    this.props = props;
+  }
+  getLastDom() {
+    return this.dom;
+  }
+}
+
+class AvocNodeFunction implements AvocNode {
+  children: AvocNode[] = [];
+  dom;
+  props;
+  type;
+  system;
+  constructor(type, props, system) {
+    this.type = type;
+    this.props = props;
+    this.system = system;
+    const result = type(props);
+    this.children = createChildren(result, system);
+  }
+  add(parentDom, next) {
+    this.dom = parentDom;
+    this.children.forEach((child) => child.add(parentDom, next));
+  }
+  delete(domParent) {
+    this.children.forEach((child) => child.delete(domParent));
+  }
+  updateProps(props: any) {
+    const result = this.type(props);
+    this.children = updateChildren(this, result, this.system);
+    this.props = props;
+  }
+  getLastDom() {
+    return this.dom;
+  }
+}
+
+class AvocNodeElement implements AvocNode {
+  type: AvocElement<unknown, unknown>;
+  props = {};
+  public children: AvocNode[] = [];
+  model;
+  dom;
+  selectors: null;
+  system;
+  rendered;
+  constructor(type: AvocElement<unknown, unknown>, props, system) {
+    this.type = type;
+    this.props = props;
+    this.system = {
+      ...system,
+      effects: {
+        ...system.effects,
+        updateModel: (msg) => this.updateWithMessage(msg),
+        getModel: () => this.model,
+      },
+    };
+    const { model, cmd } = this.type.init?.() || {};
+    this.model = model;
+    this.registerSelectors();
+    const result = this.type.render(this.model, props);
+    const appliedSys = this.applySystemIoToChildren([], result);
+    this.children = createChildren(appliedSys, this.system);
+    this.rendered = appliedSys;
+    this.model = model;
+  }
+  add(parentDom, next) {
+    this.dom = parentDom;
+    this.children.forEach((child) => child.add(parentDom, next));
+    this.runSystemIO(this.type.events?.mount?.());
+  }
+  updateWithMessage(msg) {
+    // add possibility to run effects directly
+    if (typeof msg === "object" && msg.isSystemIO) {
+      this.runSystemIO(msg);
+      return;
+    }
+
+    const update = this.type.update;
+    if (!update) {
+      return;
+    }
+    const { model, cmd } = this.type.update(this.model, msg);
+    if (model !== this.model) {
+      const result = this.type.render(model, this.props);
+      const appliedSys = this.applySystemIoToChildren(this.rendered, result);
+      this.children = updateChildren(this, appliedSys, this.system);
+      this.model = model;
+      this.rendered = appliedSys;
+    }
+    // highly experimental
+    this.runSystemIO(cmd);
+  }
+  applySystemIoToChildren(oldProps, newProps) {
+    return (Array.isArray(newProps) ? newProps : [newProps]).map(
+      (child, index) =>
+        !!child
+          ? {
+              ...child,
+              props: Object.keys(child.props).reduce((curr, key) => {
+                if (isEvent(key)) {
+                  if (
+                    oldProps[index]?.props?.[key]?.base === child.props[key]
+                  ) {
+                    return { ...curr, [key]: oldProps[index]?.props?.[key] };
+                  }
+                  const wrapper = (...args) => {
+                    const res = child.props[key](...args);
+                    if (res?.isSystemIO) {
+                      return this.runSystemIO(res);
+                    }
+                    return res;
+                  };
+                  wrapper.base = child.props[key];
+                  return { ...curr, [key]: wrapper };
+                }
+                if (key === "children" && !!child.props.children) {
+                  return {
+                    ...curr,
+                    [key]: this.applySystemIoToChildren(
+                      oldProps[index]?.props?.children || [],
+                      child.props.children
+                    ),
+                  };
+                }
+                return { ...curr, [key]: child.props[key] };
+              }, {}),
+            }
+          : child
+    );
+  }
+  runSystemIO(cmd?: SystemIO<unknown>) {
+    if (!cmd) {
+      return;
+    }
+    cmd.eval(this.system.effects);
+  }
+  updateProps(props: any) {
+    const arePropsSame = shallowEqual(this.props, props);
+    if (arePropsSame) {
+      return;
+    }
+    // this.updateWithMessage({ type: "propsReceived", value: props });
+    this.runSystemIO(this.type.events?.receiveProps(props, this.props));
+    const result = this.type.render(this.model, props);
+    const appliedSys = this.applySystemIoToChildren(this.rendered, result);
+    this.children = updateChildren(this, appliedSys, this.system);
+    this.props = props;
+    this.rendered = appliedSys;
+  }
+  delete(domParent) {
+    this.removeListeners();
+    this.children.forEach((child) => child.delete(domParent));
+  }
+  getLastDom() {
+    let dom = null;
+    this.children.forEach((child) => {
+      const childDom = child.getLastDom();
+      if (childDom) {
+        dom = childDom;
+      }
+    });
+    return dom;
+  }
+  registerSelectors() {
+    if (!this.type.selectors) {
+      return;
+    }
+    this.selectors = this.type.selectors.map((selector) => {
+      const createListener = () => {
+        let data = selector.selector(
+          this.system.avocStore.getState(selector.bucket)
+        );
+        if (typeof data !== "undefined") {
+          const { model } = this.type.update(this.model, {
+            type: selector.msg,
+            value: data,
+          });
+          this.model = model;
+        }
+        const listener = (state) => {
+          const newData = selector.selector(state);
+          if (newData === data) {
+            return;
+          }
+          data = newData;
+          this.updateWithMessage({ type: selector.msg, value: newData });
+        };
+        this.system.avocStore.register(selector.bucket, listener);
+        return { bucket: selector.bucket, listener };
+      };
+
+      return createListener();
+    });
+  }
+  removeListeners() {
+    if (!this.selectors) {
+      return;
+    }
+    this.selectors.forEach((listener) => {
+      this.system.avocStore.unRegister(listener.bucket, listener);
+    });
+  }
+}
+
+const shallowEqual = (oldProps = {}, newProps = {}) =>
+  Object.keys(oldProps).every((key) => oldProps[key] === newProps[key]) &&
+  Object.keys(newProps).every((key) => oldProps[key] === newProps[key]);
+
+const updateChildren = (parent: AvocNode, children, system): AvocNode[] => {
+  const arrayChildren = Array.isArray(children) ? children : [children];
+
+  let lastDom = null;
+  const updateLastDom = (dom) => {
+    if (dom) {
+      lastDom = dom;
+    }
+  };
+  const children2 = arrayChildren.map((child, index) => {
+    const oldElement: AvocNode | undefined = parent.children[index];
+    const isSameType = oldElement?.type === child?.type;
+
+    // update
+    if (isSameType) {
+      oldElement.updateProps(child?.props);
+      updateLastDom(oldElement.getLastDom());
+      return oldElement;
+    }
+
+    // replace
+    if (!isSameType && !!oldElement) {
+      const newChild = createChild(child, system);
+      newChild.add(parent.dom, lastDom?.nextSibling || null);
+      oldElement.delete(parent.dom);
+      updateLastDom(newChild.getLastDom());
+      return newChild;
+    }
+
+    // add
+    if (!isSameType) {
+      const newChild = createChild(child, system);
+      newChild.add(parent.dom, lastDom?.nextSibling || null);
+      updateLastDom(newChild.getLastDom());
+      return newChild;
+    }
+
+    return parent.children[index];
+  });
+
+  parent.children.forEach((child, index) => {
+    if (index >= arrayChildren.length) {
+      child.delete(parent.dom);
+    }
+  });
+
+  return children2;
+};
+
+const createChild = (child, system) => {
+  if (typeof child === "undefined") {
+    return undefined;
+  }
+  if (child === null || child === false) {
+    return new AvocNodeNone();
+  }
+  if (typeof child.type === "function") {
+    return new AvocNodeFunction(child.type, child.props, system);
+  }
+  if (child.type === "TEXT_ELEMENT") {
+    return new AvocNodeText(child.props.nodeValue);
+  }
+  if (typeof child.type === "object") {
+    return new AvocNodeElement(child.type, child.props, system);
+  }
+  return new AvocNodeHTML(child.type, child.props, system);
+};
+
+const createChildren = (children, system) =>
+  (Array.isArray(children) ? children : [children]).map((child) =>
+    createChild(child, system)
+  );
 
 const isEvent = (key) => key.startsWith("on");
 const isProperty = (key) => key !== "children" && !isEvent(key);
 const isNew = (prev, next) => (key) => prev[key] !== next[key];
 const isGone = (prev, next) => (key) => !(key in next);
-function updateDom(dom, prevProps, nextProps) {
+
+function updateDom(dom, prevProps, nextProps, system) {
   //Remove old or changed event listeners
   Object.keys(prevProps)
     .filter(isEvent)
@@ -60,7 +439,17 @@ function updateDom(dom, prevProps, nextProps) {
     .filter(isProperty)
     .filter(isNew(prevProps, nextProps))
     .forEach((name) => {
-      dom[name] = nextProps[name];
+      if (name === "style") {
+        // update style
+        transformDomStyle(dom, nextProps.style);
+      } else if (name === "className") {
+        // update className
+        prevProps.className &&
+          dom.classList.remove(...prevProps.className.split(/\s+/));
+        dom.classList.add(...nextProps.className.split(/\s+/));
+      } else {
+        dom[name] = nextProps[name];
+      }
     });
 
   // Add event listeners
@@ -69,216 +458,44 @@ function updateDom(dom, prevProps, nextProps) {
     .filter(isNew(prevProps, nextProps))
     .forEach((name) => {
       const eventType = name.toLowerCase().substring(2);
+      // TODO: there is a problem here, sub components will run the effects if its a Avoc Component
+      // nextProps[name + "Wrapper"] = createWrapper(
+      //   system.effects,
+      //   nextProps[name]
+      // );
       dom.addEventListener(eventType, nextProps[name]);
     });
 }
 
-function commitRoot() {
-  deletions.forEach(commitWork);
-  commitWork(wipRoot.child);
-  currentRoot = wipRoot;
-  wipRoot = null;
+const reg = /[A-Z]/g;
+function transformDomStyle(dom, style) {
+  dom.style = Object.keys(style).reduce((acc, styleName) => {
+    const key = styleName.replace(reg, function (v) {
+      return "-" + v.toLowerCase();
+    });
+    acc += `${key}: ${style[styleName]};`;
+    return acc;
+  }, "");
 }
 
-function commitWork(fiber) {
-  if (!fiber) {
-    return;
-  }
-
-  let domParentFiber = fiber.parent;
-  while (!domParentFiber.dom) {
-    domParentFiber = domParentFiber.parent;
-  }
-  const domParent = domParentFiber.dom;
-
-  if (fiber.effectTag === "PLACEMENT" && fiber.dom != null) {
-    domParent.appendChild(fiber.dom);
-  } else if (fiber.effectTag === "UPDATE" && fiber.dom != null) {
-    updateDom(fiber.dom, fiber.alternate.props, fiber.props);
-  } else if (fiber.effectTag === "DELETION") {
-    commitDeletion(fiber, domParent);
-  }
-
-  commitWork(fiber.child);
-  commitWork(fiber.sibling);
-}
-
-function commitDeletion(fiber, domParent) {
-  if (fiber.dom) {
-    domParent.removeChild(fiber.dom);
-  } else {
-    commitDeletion(fiber.child, domParent);
-  }
-}
-
-function render(element, container) {
-  wipRoot = {
-    dom: container,
-    props: {
-      children: [element],
-    },
-    alternate: currentRoot,
-  };
-  deletions = [];
-  nextUnitOfWork = wipRoot;
-}
-
-let nextUnitOfWork = null;
-let currentRoot = null;
-let wipRoot = null;
-let deletions = null;
-
-function workLoop(deadline) {
-  let shouldYield = false;
-  while (nextUnitOfWork && !shouldYield) {
-    nextUnitOfWork = performUnitOfWork(nextUnitOfWork);
-    shouldYield = deadline.timeRemaining() < 1;
-  }
-
-  if (!nextUnitOfWork && wipRoot) {
-    commitRoot();
-  }
-
-  requestIdleCallback(workLoop);
-}
-
-requestIdleCallback(workLoop);
-
-function performUnitOfWork(fiber) {
-  console.log("perform unit of work");
-  const isFunctionComponent = fiber.type instanceof Function;
-  const isAvoc = fiber.type?.isAvoc;
-  if (isFunctionComponent) {
-    updateFunctionComponent(fiber);
-  } else if (isAvoc) {
-    updateAvocComponent(fiber);
-  } else {
-    updateHostComponent(fiber);
-  }
-  if (fiber.child) {
-    return fiber.child;
-  }
-  let nextFiber = fiber;
-  while (nextFiber) {
-    if (nextFiber.sibling) {
-      return nextFiber.sibling;
+const createWrapper =
+  (effects, fn) =>
+  (...args) => {
+    const result = fn(...args);
+    if (!!result && result.isSystemIO) {
+      return result.eval(effects);
     }
-    nextFiber = nextFiber.parent;
-  }
-}
-
-let wipFiber = null;
-let hookIndex = null;
-
-function updateFunctionComponent(fiber) {
-  wipFiber = fiber;
-  hookIndex = 0;
-  wipFiber.hooks = [];
-  const children = [fiber.type(fiber.props)];
-  reconcileChildren(fiber, children);
-}
-
-function useState(initial) {
-  const oldHook =
-    wipFiber.alternate &&
-    wipFiber.alternate.hooks &&
-    wipFiber.alternate.hooks[hookIndex];
-  const hook = {
-    state: oldHook ? oldHook.state : initial,
-    queue: [],
+    return result;
   };
 
-  const actions = oldHook ? oldHook.queue : [];
-  actions.forEach((action) => {
-    hook.state = action(hook.state);
-  });
-
-  const setState = (action) => {
-    hook.queue.push(action);
-    wipRoot = {
-      dom: currentRoot.dom,
-      props: currentRoot.props,
-      alternate: currentRoot,
-    };
-    nextUnitOfWork = wipRoot;
-    deletions = [];
-  };
-
-  wipFiber.hooks.push(hook);
-  hookIndex++;
-  return [hook.state, setState];
-}
-
-function updateAvocComponent(fiber) {
-  const oldModel = wipFiber?.alternate?.model;
-  const model = oldModel || fiber.type.init().model;
-  // const children = [fiber.type.render(fiber.props)]
-  const children = [fiber.type.render(model)];
-  reconcileChildren(fiber, children);
-}
-
-function updateHostComponent(fiber) {
-  if (!fiber.dom) {
-    fiber.dom = createDom(fiber);
-  }
-  reconcileChildren(fiber, fiber.props.children);
-}
-
-function reconcileChildren(wipFiber, elements) {
-  let index = 0;
-  let oldFiber = wipFiber.alternate && wipFiber.alternate.child;
-  let prevSibling = null;
-
-  while (index < elements.length || oldFiber != null) {
-    const element = elements[index];
-    let newFiber = null;
-
-    const sameType = oldFiber && element && element.type == oldFiber.type;
-
-    if (sameType) {
-      newFiber = {
-        type: oldFiber.type,
-        props: element.props,
-        dom: oldFiber.dom,
-        parent: wipFiber,
-        alternate: oldFiber,
-        effectTag: "UPDATE",
-      };
-    }
-    if (element && !sameType) {
-      newFiber = {
-        type: element.type,
-        props: element.props,
-        dom: null,
-        parent: wipFiber,
-        alternate: null,
-        effectTag: "PLACEMENT",
-      };
-    }
-    if (oldFiber && !sameType) {
-      oldFiber.effectTag = "DELETION";
-      deletions.push(oldFiber);
-    }
-
-    if (oldFiber) {
-      oldFiber = oldFiber.sibling;
-    }
-
-    if (index === 0) {
-      wipFiber.child = newFiber;
-    } else if (element) {
-      prevSibling.sibling = newFiber;
-    }
-
-    prevSibling = newFiber;
-    index++;
-  }
-}
+const render = (element, container, system) => {
+  const node = new AvocNodeElement(element.type, element.props, system);
+  node.add(container);
+};
 
 const Avoc = {
-  createElement,
+  co,
   render,
-  useState,
 };
 
 export default Avoc;

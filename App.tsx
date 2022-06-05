@@ -5,16 +5,15 @@ import { AvocEffects, AvocStoreEffects } from "./Effects";
 import { _do } from "./SystemIO";
 
 
-// declare global {
-//     namespace Avoc {
-//         namespace JSX {
-//             // intrinsic elements
-//             function createElement<K extends keyof JSX.IntrinsicElements>(tag: K, props: JSX.IntrinsicElements[K], children: JSX.Element[]): JSX.Element;
-//             // functional components
-//             function createElement<P>(((props: P) => JSX.Element), props: P, children: JSX.Element[]): JSX.Element;
-//         }
-//     }
-// }
+declare global {
+    namespace JSX {
+        function createElement<P>(type: AvocElement<unknown, unknown>, props: P);
+        // intrinsic elements
+        // function createElement<K extends keyof JSX.IntrinsicElements>(tag: K, props: JSX.IntrinsicElements[K], children: JSX.Element[]): JSX.Element;
+        // functional components
+        //function createElement<P>(type: ((props: P) => JSX.Element), props: P, children: JSX.Element[]): JSX.Element;
+    }
+}
 
 type Model = {
     count: number;
